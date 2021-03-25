@@ -1,5 +1,5 @@
 #include <torch/csrc/jit/python/pybind_utils.h>
-
+#include <torch/csrc/jit/python/python_dict.h>
 #include <torch/csrc/jit/python/python_ivalue.h>
 
 namespace torch {
@@ -136,6 +136,21 @@ IValue toIValue(py::handle obj, const TypePtr& type, c10::optional<int32_t> N) {
     }
     case TypeKind::DictType: {
       const auto& dict_type = type->expect<DictType>();
+
+      // If the object is a ScriptDict, retrieve the c10::Dict
+      // instance inside it.
+      if (py::isinstance(
+              obj,
+              py::module::import("torch.jit._script").attr("ScriptDict"))) {
+        auto script_dict = py::cast<ScriptDict>(obj.attr("_c"));
+        return script_dict.dict_;
+      }
+
+      TORCH_WARN(
+          "Script your dictionary using torch.jit.script in order to get reference semantics and reduced copy overhead between Python and TorchScript");
+
+      // If not (i.e. it is a regular Python dictionary), make a new
+      // c10::Dict.
       return createGenericDict(
           py::cast<py::dict>(obj),
           dict_type->getKeyType(),
