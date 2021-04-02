@@ -70,6 +70,13 @@ Tensor empty_cuda(IntArrayRef size, c10::optional<ScalarType> dtype_opt, c10::op
 
   auto memory_format = memory_format_opt.value_or(MemoryFormat::Contiguous);
   tensor.unsafeGetTensorImpl()->empty_tensor_restride(memory_format);
+
+  // Sanity check before return
+  AT_ASSERT(tensor.device().has_index());
+  if (device_opt.value().has_index()) {
+    AT_ASSERT(tensor.device().index() == device_opt.value().index());
+  }
+
   return tensor;
 }
 
