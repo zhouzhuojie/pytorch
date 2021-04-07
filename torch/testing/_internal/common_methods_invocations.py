@@ -17,7 +17,7 @@ from torch.testing import \
     (make_non_contiguous, _dispatch_dtypes, floating_types, floating_types_and,
      floating_and_complex_types, floating_and_complex_types_and,
      all_types_and_complex_and, all_types_and, all_types_and_complex,
-     integral_types_and)
+     integral_types_and, all_types)
 from torch.testing._internal.common_device_type import \
     (skipIf, skipMeta, skipCUDAIfNoMagma, skipCUDAIfNoMagmaAndNoCusolver, skipCUDAIfNoCusolver,
      skipCPUIfNoLapack, skipCPUIfNoMkl,
@@ -1052,6 +1052,57 @@ def sample_inputs_max_min_reduction_no_dim(op_info, device, dtype, requires_grad
                                           low=None, high=None,
                                           requires_grad=requires_grad),))
     return inputs
+
+# Generates input tensors for testing reduction ops
+def _generate_reduction_inputs(device, dtype, requires_grad):
+    yield make_tensor((), device, dtype, requires_grad=requires_grad)
+    yield make_tensor((2,), device, dtype, requires_grad=requires_grad)
+    yield make_tensor((2, 3), device, dtype, requires_grad=requires_grad, discontiguous=True)
+    yield make_tensor((3, 2, 1, 2, 2), device, dtype, requires_grad=requires_grad)
+
+# Generates a subset of possible dim and keepdim kwargs for a tensor
+# with ndim dims appropriate for testing. If supports_multiple_dims
+# is True (default) then dim kwarg can be a list of dims.
+def _generate_reduction_kwargs(ndim, supports_multiple_dims=True):
+    for keepdim in [True, False]:
+        # Always test reducing inner and outer most dimensions
+        yield {'dim': 0, 'keepdim': keepdim}
+        yield {'dim': -1, 'keepdim': keepdim}
+
+        # Also reduce middle dimension
+        if ndim > 2:
+            yield {'dim': ndim // 2, 'keepdim': keepdim}
+
+        if supports_multiple_dims:
+            # Always test reducing all dims
+            yield {'dim': tuple(range(ndim)), 'keepdim': keepdim}
+
+            # Test reducing both first and last dimensions
+            if ndim > 1:
+                yield {'dim': (0, ndim - 1), 'keepdim': keepdim}
+
+            # Test reducing every other dimension starting with the second
+            if ndim > 3:
+                yield {'dim': tuple(range(1, ndim, 2)), 'keepdim': keepdim}
+
+# Wraps sample_inputs_reduction function to provide the additional supports_multiple_dims args
+def sample_inputs_reduction_wrapper(supports_multiple_dims):
+    # Generates sample inputs for reduction ops that contain the input tensor
+    # and dim and keepdim kwargs. If a reduction op needs to test additional
+    # args/kwargs then create a separate sample_inputs function
+    def fn(op_info, device, dtype, requires_grad):
+        inputs = []
+
+        for t in _generate_reduction_inputs(device, dtype, requires_grad):
+            # Add case without dim and keepdim kwargs
+            inputs.append(SampleInput(t))
+            for kwargs in _generate_reduction_kwargs(t.ndim, supports_multiple_dims):
+                inputs.append(SampleInput(t, kwargs=kwargs))
+
+        return inputs
+
+    return fn
+
 
 def sample_inputs_outer(op_info, device, dtype, requires_grad, **kwargs):
     inputs = []
@@ -3239,6 +3290,32 @@ op_db: List[OpInfo] = [
            dtypesIfCUDA=all_types_and(torch.float16, torch.bfloat16, torch.bool),
            supports_out=False,
            sample_inputs_func=sample_inputs_max_min_reduction_no_dim,),
+    OpInfo('median',
+           dtypesIfCPU=all_types(),
+           dtypesIfCUDA=all_types_and(torch.float16),
+           # TODO: some signatures of median do support out
+           supports_out=False,
+           sample_inputs_func=sample_inputs_reduction_wrapper(False)),
+    OpInfo('nanmedian',
+           dtypesIfCPU=all_types(),
+           dtypesIfCUDA=all_types_and(torch.float16),
+           # TODO: some signatures of nanmedian do support out
+           supports_out=False,
+           sample_inputs_func=sample_inputs_reduction_wrapper(False)),
+    OpInfo('var_mean',
+           # TODO: some signatures of nanmedian do support out
+           dtypesIfCPU=floating_and_complex_types_and(torch.half),
+           dtypesIfCUDA=floating_and_complex_types_and(torch.half),
+           supports_out=False,
+           sample_inputs_func=sample_inputs_reduction_wrapper(False),
+           supports_complex_autograd=False,
+           skips=(
+               SkipInfo('TestCommon', 'test_variant_consistency_jit'),
+               SkipInfo('TestGradients', 'test_fn_grad'),
+               SkipInfo('TestGradients', 'test_fn_gradgrad'),
+               # var supports bfloat16 for some inputs and not others
+               SkipInfo('TestOpInfo', 'test_unsupported_dtypes', dtypes=(torch.bfloat16,))
+           )),
     OpInfo('min',
            op=torch.min,
            variant_test_name='binary',
@@ -4354,20 +4431,6 @@ def method_tests():
         ('nanquantile', (S, S, S), (0.5, 0, False), 'midpoint', (), [1], NO_ARGS, ident, {'interpolation': 'midpoint'}),
         ('nanquantile', (S, S, S), (0.5, 0, False), 'nearest', (), [1], NO_ARGS, ident, {'interpolation': 'nearest'}),
         ('nanquantile', (), (0.5,), 'scalar'),
-        ('median', (S, S, S), NO_ARGS),
-        ('median', (S, S, S), (1,), 'dim', (), [0]),
-        ('median', (S, S, S), (1,), 'dim_alert_nondeterministic', (), [0],
-            [skipMeta, expectedAlertNondeterministic('median CUDA with indices output', 'cuda')]),
-        ('median', (S, S, S), (1, True,), 'keepdim_dim', (), [0]),
-        ('median', (), NO_ARGS, 'scalar'),
-        ('median', (), (0,), 'scalar_dim', (), [0]),
-        ('median', (), (0, True,), 'scalar_keepdim_dim', (), [0]),
-        ('nanmedian', (S, S, S), NO_ARGS),
-        ('nanmedian', (S, S, S), (1,), 'dim', (), [0]),
-        ('nanmedian', (S, S, S), (1, True,), 'keepdim_dim', (), [0]),
-        ('nanmedian', (), NO_ARGS, 'scalar'),
-        ('nanmedian', (), (0,), 'scalar_dim', (), [0]),
-        ('nanmedian', (), (0, True,), 'scalar_keepdim_dim', (), [0]),
         ('sum', (S, S, S), NO_ARGS),
         ('sum', (S, S, S), (1,), 'dim', (), [0]),
         ('sum', (S, S, S), (1, True,), 'keepdim_dim', (), [0]),
@@ -4384,11 +4447,6 @@ def method_tests():
         ('nansum', (), (0, True,), 'scalar_keepdim_dim', (), [0]),
         ('nansum', (S, S, S), ([1, 2],), 'multi_dim'),
         ('nansum', (S, S, S), ([1, 2], True,), 'multi_dim_keepdim'),
-        ('var_mean', (S, S, S), NO_ARGS, ''),
-        ('var_mean', (S, S, S), (1,), 'dim', [0]),
-        ('var_mean', (S, S, S), (1, True, True), 'keepdim_dim', [0]),
-        ('var_mean', (S,), (0,), 'dim_1d', [0]),
-        ('var_mean', (S,), (0, True, True), 'keepdim_dim_1d', [0]),
         ('std_mean', (S, S, S), NO_ARGS, ''),
         ('std_mean', (S, S, S), (1,), 'dim', [0]),
         ('std_mean', (S, S, S), (1, True, True), 'keepdim_dim', [0]),
