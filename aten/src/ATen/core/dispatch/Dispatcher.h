@@ -485,7 +485,10 @@ inline Return Dispatcher::callWithDispatchKeySlowPath(const TypedOperatorHandle<
     auto dispatchKey = dispatchKeySet.highestPriorityTypeId();
     if (op.operatorDef_->op.isObserved()) {
       if (guard.needsInputs()) {
-        runRecordFunction(guard, op, dispatchKey, impl::boxArgs(args...));
+        static torch::jit::Stack stack = impl::new_stack_with_capacity(std::max(impl::PopResult<Return>::RetCount, sizeof...(Args)));
+        impl::boxArgs(&stack, args...);
+        runRecordFunction(guard, op, dispatchKey, stack);
+        stack.clear();
       } else {
         runRecordFunction(guard, op, dispatchKey);
       }

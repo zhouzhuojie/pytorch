@@ -70,16 +70,20 @@ using can_unbox =
     guts::negation<std::is_lvalue_reference<T>>
   >;
 
+inline torch::jit::Stack new_stack_with_capacity(size_t capacity) {
+  torch::jit::Stack result;
+  result.reserve(capacity);
+  return result;
+}
+
 //
 // boxArgs - utility for pushing unboxed args onto IValue stack
 //
 template <class... Args>
-torch::jit::Stack boxArgs(Args... args) {
-  // TODO Reuse stack vector instead of allocating?
-  torch::jit::Stack stack;
-  stack.reserve(sizeof...(Args));
-  torch::jit::push(stack, std::forward<Args>(args)...);
-  return stack;
+void boxArgs(torch::jit::Stack* stack, Args... args) {
+  TORCH_INTERNAL_ASSERT(stack->size() == 0 && stack->capacity() >= sizeof...(Args),
+    "Our logic to reuse the stack somehow didn't set up the stack correctly. This will either be a memory leak (if stack.size() != 0) or cause an unnecessary heap allocation (if stack->capacity() >= sizeof...(Args) )");
+  torch::jit::push(*stack, std::forward<Args>(args)...);
 }
 
 //
@@ -88,6 +92,7 @@ torch::jit::Stack boxArgs(Args... args) {
 //
 template <class Result>
 struct PopResult final {
+  static constexpr size_t RetCount = 1;
   static Result call(Stack& stack) {
     TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
       stack.size() == 1,
@@ -101,10 +106,11 @@ struct PopResult final {
 template <class... Types>
 struct PopResult<std::tuple<Types...>> final {
   using Result = std::tuple<Types...>;
+  static constexpr size_t RetCount = sizeof...(Types);
 
   static Result call(Stack& stack) {
     // for tuple return types, boxed kernel has pushed multiple values onto the stack
-    constexpr int RetCount = sizeof...(Types);
+    constexpr size_t RetCount = sizeof...(Types);
     TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
       stack.size() == RetCount,
       "Boxed kernel was expected to return ", RetCount, " values on the stack, ",
@@ -176,13 +182,17 @@ struct BoxedKernelWrapper<
     DispatchKeySet dispatchKeySet,
     Args... args
   ) {
-    torch::jit::Stack stack = boxArgs<Args...>(std::forward<Args>(args)...);
+    constexpr size_t RetCount = PopResult<Result>::RetCount;
+    static torch::jit::Stack stack = new_stack_with_capacity(std::max(RetCount, sizeof...(Args)));
+    boxArgs<Args...>(&stack, std::forward<Args>(args)...);
     (*boxed_kernel_func)(functor, opHandle, dispatchKeySet, &stack);
 
     return guts::if_constexpr<!std::is_same<void, Result>::value>(
       [&] (auto delay_check) {
         // op has pushed one or more values onto the stack.
-        return delay_check(PopResult<Result>::call(stack));
+        typename decltype(delay_check)::template type_identity<Result> result = delay_check(PopResult<Result>::call(stack));
+        stack.clear();
+        return result;
       },
       [&] {
         // op returns void, boxed kernel has pushed nothing onto stack.
@@ -217,13 +227,16 @@ struct BoxedKernelWrapper<
     DispatchKeySet dispatchKeySet,
     at::Tensor& outArg, OtherArgs... otherArgs
   ) {
-    torch::jit::Stack stack = boxArgs<at::Tensor&, OtherArgs...>(outArg, std::forward<OtherArgs>(otherArgs)...);
+    constexpr size_t RetCount = 1;
+    static torch::jit::Stack stack = new_stack_with_capacity(std::max(RetCount, 1 + sizeof...(OtherArgs)));
+    boxArgs<at::Tensor&, OtherArgs...>(&stack, outArg, std::forward<OtherArgs>(otherArgs)...);
     (*boxed_kernel_func)(functor, opHandle, dispatchKeySet, &stack);
     TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
       stack.size() == 1,
       "Boxed kernel was expected to return a single value on the stack, ",
       "but instead returned ", stack.size(), " values."
     );
+    stack.clear();
 
     return outArg;
   }
@@ -255,13 +268,16 @@ struct BoxedKernelWrapper<
     DispatchKeySet dispatchKeySet,
     FirstArg firstArg, RestArgs... restArgs
   ) {
-    torch::jit::Stack stack = boxArgs<FirstArg, RestArgs...>(std::forward<FirstArg>(firstArg), std::forward<RestArgs>(restArgs)...);
+    constexpr size_t RetCount = 1;
+    static torch::jit::Stack stack = new_stack_with_capacity(std::max(RetCount, 1 + sizeof...(RestArgs)));
+    boxArgs<FirstArg, RestArgs...>(&stack, std::forward<FirstArg>(firstArg), std::forward<RestArgs>(restArgs)...);
     (*boxed_kernel_func)(functor, opHandle, dispatchKeySet, &stack);
     TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
       stack.size() == 1,
       "Boxed kernel was expected to return a single value on the stack, ",
       "but instead returned ", stack.size(), " values."
     );
+    stack.clear();
 
     // reusing restArgs after it has been forwarded here is ok because we know
     // that the last element is of type `Tensor&`.
@@ -293,19 +309,21 @@ struct BoxedKernelWrapper<
     Args... args
   ) {
     using ArgTuple = std::tuple<Args...>;
-    constexpr int RetCount = std::tuple_size<Result>();
+    constexpr size_t RetCount = std::tuple_size<Result>();
 
-    torch::jit::Stack stack = boxArgs<Args...>(std::forward<Args>(args)...);
+    static torch::jit::Stack stack = new_stack_with_capacity(std::max(RetCount, sizeof...(Args)));
+    boxArgs<Args...>(&stack, std::forward<Args>(args)...);
     (*boxed_kernel_func)(functor, opHandle, dispatchKeySet, &stack);
     TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
       stack.size() == RetCount,
       "Boxed kernel was expected to return ", RetCount, " values on the stack, ",
       "but instead returned ", stack.size(), " values."
     );
+    stack.clear();
 
     // reusing args after it has been forwarded here is ok because we know
     // that the last RetCount elements are of type `Tensor&`.
-    auto result = guts::tuple_take<ArgTuple, -RetCount>(ArgTuple{std::forward<Args>(args)...});
+    auto result = guts::tuple_take<ArgTuple, -static_cast<int>(RetCount)>(ArgTuple{std::forward<Args>(args)...});
     static_assert(
         std::is_same<Result, decltype(result)>::value,
         "The parameter list of an op returning a tuple of Tensor references "
