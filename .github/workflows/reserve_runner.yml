@@ -1,0 +1,19 @@
+name: Reserve Github Actions Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      runnerType:
+        description: 'The type of runner you would like to reserve'
+        default: "linux.2xlarge"
+
+jobs:
+  reserve-runner:
+    runs-on: ${{ github.event.inputs.runnerType }}
+    steps:
+      - name: Setup tmate session for ${{ github.event.inputs.runnerType }}
+        uses: seemethere/action-tmate@f708e7bca76af1b52bb8c8e5fe790ef5e01a4fc8
+        timeout-minutes: 120 # 2 hours
+        with:
+          limit-access-to-actor: true
+          install_dependencies: false
