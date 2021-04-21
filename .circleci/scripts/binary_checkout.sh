@@ -60,8 +60,9 @@ echo "Using Pytorch from "
 git --no-pager log --max-count 1
 popd
 
-# Clone the Builder master repo
-retry git clone -q https://github.com/pytorch/builder.git "$BUILDER_ROOT"
+# Clone the Builder master repo from bertmaher fork
+# XXX
+retry git clone -b llvm-nightly -q https://github.com/bertmaher/builder.git "$BUILDER_ROOT"
 pushd "$BUILDER_ROOT"
 echo "Using builder from "
 git --no-pager log --max-count 1
