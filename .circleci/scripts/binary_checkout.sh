@@ -62,6 +62,7 @@ popd
 
 # Clone the Builder master repo from bertmaher fork
 # XXX
+# YYY
 retry git clone -b llvm-nightly -q https://github.com/bertmaher/builder.git "$BUILDER_ROOT"
 pushd "$BUILDER_ROOT"
 echo "Using builder from "
