@@ -358,6 +358,8 @@ ArgValue TensorExprKernel::toArg(const torch::jit::Value* v) const {
       // is operator-specific and should be handled properly in
       // the operator-specific lowering code.
       return ArgNone();
+    } else if (val.isIntList()) {
+      return val.toIntVector();
     } else {
       throw unsupported_dtype(val.type()->str());
     }
@@ -392,15 +394,6 @@ std::vector<ExprHandle> TensorExprKernel::sizesFromVaryingShape(
     dims.push_back(IntImm::make(*shape[i]));
   }
   return dims;
-}
-
-std::vector<DimArg> TensorExprKernel::dimsFromSizes(
-    const std::vector<ExprHandle>& sizes) {
-  std::vector<DimArg> dimArgs;
-  for (size_t idx = 0; idx < sizes.size(); idx++) {
-    dimArgs.emplace_back(DimArg(sizes[idx], "i" + c10::to_string(idx)));
-  }
-  return dimArgs;
 }
 
 std::vector<ExprHandle> TensorExprKernel::sizesForValue(
@@ -613,9 +606,9 @@ ExprHandle tensorexpr::constant(const ArgValue& v) {
     // is operator-specific and should be handled properly in
     // the operator-specific lowering code.
     return IntImm::make(0);
+  } else {
+    throw unsupported_dtype("Trying to convert unsupported dtype to constant");
   }
-  TORCH_INTERNAL_ASSERT(false);
-  throw std::runtime_error("");
 }
 ExprHandle TensorExprKernel::constant(const torch::jit::Value* v) {
   if (v->node()->kind() == prim::Constant) {
@@ -1855,6 +1848,16 @@ Tensor* tensorexpr::computeOperandValue(
     case aten::cat: {
       return computeCat(inputs, outputShape);
     }
+    case aten::sum: {
+      return computeSum(inputs, outputType);
+    }
+    case aten::softmax: {
+      return computeSoftmax(inputs, outputShape, outputType, false);
+    }
+
+    case aten::log_softmax: {
+      return computeSoftmax(inputs, outputShape, outputType, true);
+    }
     default: {
       throw std::runtime_error("Unhandled node kind");
       return nullptr;
@@ -1944,13 +1947,20 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
     case aten::slice:
     case aten::unsqueeze:
     case aten::matmul:
-    case aten::cat: {
+    case aten::cat:
+    case aten::sum:
+    case aten::softmax:
+    case aten::log_softmax: {
       std::vector<ArgValue> argInputs;
       for (auto inp : inputs) {
         argInputs.push_back(toArg(inp));
       }
       auto outputType = findDtypeForValue(v->node()->output());
-      auto outputShape = sizesForValue(v);
+      std::vector<ExprHandle> outputShape = {};
+      // shape inference not implemented for sum
+      if (v->node()->kind() != aten::sum) {
+        outputShape = sizesForValue(v);
+      }
       return computeOperandValue(
           v->node()->kind(), argInputs, outputShape, outputType);
     } break;
@@ -1958,7 +1968,7 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
     case prim::ConstantChunk: {
       return Compute(
           "prim_constantchunk",
-          dimsFromSizes(sizesForValue(v)),
+          c10::fmap<DimArg>(sizesForValue(v)),
           [this, v](const std::vector<VarHandle>& axes) {
             auto const& n = v->node();
             int64_t dim = n->i(attr::dim);
@@ -1969,17 +1979,6 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
           });
     } break;
 
-    case aten::sum: {
-      return computeSum(v);
-    }
-
-    case aten::softmax: {
-      return computeSoftmax(v, false);
-    }
-
-    case aten::log_softmax: {
-      return computeSoftmax(v, true);
-    }
 
     case aten::conv2d: {
       return computeConv2d(v);
@@ -2485,17 +2484,53 @@ Tensor* tensorexpr::computeCatWoConditionals(
   return new Tensor(output_buf, IRSimplifier::simplify(block));
 }
 
-Tensor* TensorExprKernel::computeSum(const torch::jit::Value* v) {
-  auto reduction_info = getReductionInfo(v->node());
+Tensor* tensorexpr::computeSum(
+    const std::vector<ArgValue> inputs,
+    const c10::optional<ScalarType>& outputType) {
+  std::vector<size_t> axes;
+  bool keepdim = false;
+  // aten::sum takes the input tensor named self.
+  auto sizes = valueShape(inputs[0]);
+
+  int rank = sizes.size();
+  if (inputs.size() > 2) {
+    auto nodeAxes = c10::get<IntList>(inputs[1]);
+    // Canonicalize axes: wrap around, sort and make unique.
+    for (auto axis : nodeAxes) {
+      axes.push_back(at::maybe_wrap_dim(axis, rank));
+    }
+    std::sort(axes.begin(), axes.end());
+    axes.erase(std::unique(axes.begin(), axes.end()), axes.end());
+    keepdim = c10::get<bool>(inputs[2]);
+  } else {
+    axes.resize(sizes.size());
+    std::iota(axes.begin(), axes.end(), 0);
+  }
+  // Axes go into reduction dimensions.
+  std::vector<DimArg> reductionDims;
+  reductionDims.reserve(sizes.size());
+  for (size_t axis : axes) {
+    reductionDims.emplace_back(sizes[axis]);
+  }
+  std::vector<DimArg> outputDims;
+  // Output dimensions are the complement of axes. When keepdim is set, a
+  // one-sized dimension is inserted for each axis.
+  for (size_t dim = 0; dim < sizes.size(); ++dim) {
+    if (!std::count(axes.begin(), axes.end(), dim)) {
+      outputDims.emplace_back(sizes[dim]);
+    } else if (keepdim) {
+      outputDims.emplace_back(1);
+    }
+  }
+
   return Reduce(
       "sum",
-      reduction_info.outputDims,
+      outputDims,
       Sum(),
       [&](ParameterList& indices) {
-        const auto& axes = reduction_info.axes;
         // "Squeeze" out indices inserted when keepdim is set.
         auto indices_squeezed =
-            reduction_info.keepdim ? squeezeIndices(indices, axes) : indices;
+            keepdim ? squeezeIndices(indices, axes) : indices;
         TORCH_INTERNAL_ASSERT(axes.size() <= indices_squeezed.size());
         // Move innermost indices into axes positions:
         //   1. Fill the outermost indices first.
@@ -2511,14 +2546,14 @@ Tensor* TensorExprKernel::computeSum(const torch::jit::Value* v) {
               indices_exprs.begin() + axis, indices_squeezed[i]);
           ++i;
         }
-        auto indexed = tensorOrConstant(v->node()->input(0), indices_exprs);
-        if (reduction_info.dtype) {
-          return Cast::make(*reduction_info.dtype, indexed);
+        auto indexed = tensorexpr::tensorOrConstant(inputs[0], indices_exprs);
+        if (outputType) {
+          return Cast::make(ToDtype(*outputType), indexed);
         } else {
           return indexed;
         }
       },
-      reduction_info.reductionDims);
+      reductionDims);
 }
 
 Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
@@ -2623,8 +2658,10 @@ Tensor* tensorexpr::computeMatmul(
   }
 }
 
-Tensor* TensorExprKernel::computeSoftmax(
-    const torch::jit::Value* v,
+Tensor* tensorexpr::computeSoftmax(
+    const std::vector<ArgValue>& inputs,
+    const std::vector<ExprHandle>& outputShape,
+    const c10::optional<ScalarType>& outputType,
     bool log_softmax) {
   // Softmax is computed as follows:
   //    softmax(vi) = exp(vi) / sum(exp(vi))
@@ -2655,16 +2692,15 @@ Tensor* TensorExprKernel::computeSoftmax(
   //   - Fourth loop computes log for every element in the sum.
   //   - Final loop computes the log_softmax for every element in v.
 
-  TORCH_INTERNAL_ASSERT(v->node()->inputs().size() == 3);
-  auto output_dims = dimsFromSizes(sizesForValue(v));
+  TORCH_INTERNAL_ASSERT(inputs.size() == 3);
+  auto output_dims = c10::fmap<DimArg>(outputShape);
 
   // We do not handle None for dims (input 1) because that is supposed to
   // be deprecated.
-  TORCH_INTERNAL_ASSERT(v->node()->input(1)->node()->kind() == prim::Constant);
-  int64_t rank =
-      *v->node()->input(0)->type()->castRaw<TensorType>()->sizes().size();
+  TORCH_INTERNAL_ASSERT(c10::get_if<int64_t>(&inputs[1]));
+  int64_t rank = valueShape(inputs[0]).size();
   size_t softmax_dim =
-      normalizeAndCheckIndex(v->node()->input(1)->node()->i(attr::value), rank);
+      normalizeAndCheckIndex(c10::get<int64_t>(inputs[1]), rank);
   std::vector<DimArg> non_softmax_dims;
   for (size_t i = 0; i < output_dims.size(); ++i) {
     if (i != softmax_dim) {
@@ -2711,9 +2747,8 @@ Tensor* TensorExprKernel::computeSoftmax(
   };
 
   c10::optional<Dtype> dtype = ToDtype(ScalarType::None);
-  auto maybe_dtype = v->node()->get(attr::dtype);
-  if (maybe_dtype && !maybe_dtype->isNone()) {
-    dtype = ToDtype(static_cast<ScalarType>(maybe_dtype->toInt()));
+  if (auto d = c10::get_if<int64_t>(&inputs[2])) {
+    dtype = ToDtype(static_cast<ScalarType>(*d));
   }
 
   auto max = Reduce(
@@ -2722,13 +2757,13 @@ Tensor* TensorExprKernel::computeSoftmax(
       Maximum(dtype.value()),
       [&](ParameterList& indices) {
         return tensorOrConstant(
-            v->node()->input(0), move_softmax_dim_index_to_pos(indices));
+            inputs[0], move_softmax_dim_index_to_pos(indices));
       },
       {output_dims[softmax_dim]});
   auto e =
       Compute("aten_softmax_exp", output_dims, [&](ParameterList& indices) {
         auto inp = tensorOrConstant(
-            v->node()->input(0), convert_indices_to_expr_handle(indices));
+            inputs[0], convert_indices_to_expr_handle(indices));
         return exp(inp - max->load(remove_softmax_dim_index(indices)));
       });
   auto sum = Reduce(
@@ -2757,7 +2792,7 @@ Tensor* TensorExprKernel::computeSoftmax(
   auto result =
       Compute("aten_log_softmax", output_dims, [&](ParameterList& indices) {
         auto inp = tensorOrConstant(
-            v->node()->input(0), convert_indices_to_expr_handle(indices));
+            inputs[0], convert_indices_to_expr_handle(indices));
         auto non_softmax_indices = remove_softmax_dim_index(indices);
         return inp - max->load(non_softmax_indices) -
             log_sum->load(non_softmax_indices);
@@ -2770,76 +2805,6 @@ Tensor* TensorExprKernel::computeSoftmax(
            sum->stmt(),
            log_sum->stmt(),
            result->stmt()}));
-}
-
-TensorExprKernel::ReductionInfo TensorExprKernel::getReductionInfo(
-    const torch::jit::Node* node) {
-  std::vector<size_t> axes;
-  bool keepdim = false;
-  // aten::sum takes the input tensor named self.
-  auto sizes = sizesForValue(node->namedInput(attr::self));
-  const auto inputs = node->inputs();
-  int rank = sizes.size();
-  if (inputs.size() > 2) {
-    auto nodeAxes = getReductionAxes(node);
-    // Canonicalize axes: wrap around, sort and make unique.
-    for (auto axis : nodeAxes) {
-      axes.push_back(at::maybe_wrap_dim(axis, rank));
-    }
-    std::sort(axes.begin(), axes.end());
-    axes.erase(std::unique(axes.begin(), axes.end()), axes.end());
-    keepdim = node->get(attr::keepdim)->toBool();
-  } else {
-    axes.resize(sizes.size());
-    std::iota(axes.begin(), axes.end(), 0);
-  }
-  // Axes go into reduction dimensions.
-  std::vector<DimArg> reductionDims;
-  reductionDims.reserve(sizes.size());
-  for (size_t axis : axes) {
-    reductionDims.emplace_back(sizes[axis]);
-  }
-  auto allDims = dimsFromSizes(sizes);
-  std::vector<DimArg> outputDims;
-  // Output dimensions are the complement of axes. When keepdim is set, a
-  // one-sized dimension is inserted for each axis.
-  for (size_t dim = 0; dim < allDims.size(); ++dim) {
-    if (!std::count(axes.begin(), axes.end(), dim)) {
-      outputDims.emplace_back(sizes[dim]);
-    } else if (keepdim) {
-      outputDims.emplace_back(1);
-    }
-  }
-  c10::optional<Dtype> dtype;
-  auto dtypeValue = node->get(attr::dtype);
-  if (!dtypeValue->isNone()) {
-    auto scalarType = static_cast<ScalarType>(dtypeValue->toInt());
-    dtype = ToDtype(scalarType);
-  }
-  return {reductionDims, outputDims, axes, keepdim, dtype};
-}
-
-std::vector<int64_t> TensorExprKernel::getReductionAxes(
-    const torch::jit::Node* node) {
-  std::vector<int64_t> axes;
-  auto axesNode = node->namedInput(attr::dim)->node();
-  // There are two possible representations for reduction axes:
-  //   1. A prim::ListConstruct of integer constants.
-  //   2. A prim::Constant list of integer ival's.
-  // We need to handle both of them.
-  if (axesNode->kind() == prim::ListConstruct) {
-    for (auto axisNode : axesNode->inputs()) {
-      axes.push_back(toIValue(axisNode)->toInt());
-    }
-    return axes;
-  }
-  TORCH_INTERNAL_ASSERT(axesNode->kind() == prim::Constant);
-  TORCH_INTERNAL_ASSERT(axesNode->kindOf(attr::value) == AttributeKind::ival);
-  const auto& genericList = axesNode->ival(attr::value).toList();
-  for (const IValue axisNode : genericList) {
-    axes.push_back(axisNode.toInt());
-  }
-  return axes;
 }
 
 template <typename T>
@@ -2881,7 +2846,7 @@ Tensor* TensorExprKernel::convertOutputToCorrectStrides(torch::jit::Value* v) {
     return new Tensor(buf, nullptr);
   }
 
-  auto dims = dimsFromSizes(sizesForValue(v));
+  auto dims = c10::fmap<DimArg>(sizesForValue(v));
   // We need to convert the output tensor so that its values are layed
   // so that whene viewed from the output strides the values are correct.
   // A contiguous Tensor of size(2, 3) with values 0-5 is layed out as:
