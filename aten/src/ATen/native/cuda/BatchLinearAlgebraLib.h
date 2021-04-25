@@ -36,6 +36,8 @@ Tensor& orgqr_helper_cusolver(Tensor& result, const Tensor& tau, int64_t n_colum
 
 void linalg_eigh_cusolver(Tensor& eigenvalues, Tensor& eigenvectors, Tensor& infos, bool upper, bool compute_eigenvectors);
 
+void apply_lu_cusolver_looped(Tensor& self, Tensor& pivots, Tensor& infos, bool get_pivots);
+
 #endif  // USE_CUSOLVER
 
 }}  // namespace at::native

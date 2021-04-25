@@ -686,6 +686,12 @@ Tensor& orgqr_helper_cusolver(Tensor& result, const Tensor& tau, int64_t n_colum
   return result;
 }
 
+void apply_lu_cusolver_looped(Tensor& self, Tensor& pivots, Tensor& infos, bool get_pivots) {
+  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(self.scalar_type(), "lu_cusolver", [&]{
+    
+  });
+}
+
 template <typename scalar_t>
 static void apply_syevd(Tensor& values, Tensor& vectors, Tensor& infos, bool upper, bool compute_eigenvectors) {
   using value_t = typename c10::scalar_value_type<scalar_t>::type;
