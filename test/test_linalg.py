@@ -5188,8 +5188,8 @@ class TestLinalg(TestCase):
 
                 P, L, U = torch.lu_unpack(a_LU, pivots)
                 P_ = P.cpu().numpy()
-                L_ = L.cpu().numpy()
-                U_ = U.cpu().numpy()
+                L_ = np.nan_to_num(L.cpu().numpy())
+                U_ = np.nan_to_num(U.cpu().numpy())
 
                 self.assertEqual(np.matmul(P_, np.matmul(L_, U_)), a)
 
@@ -5198,8 +5198,8 @@ class TestLinalg(TestCase):
                     a_LU_info_nopiv, nopiv, info_nopiv = a.lu(pivot=False, get_infos=True)
                     P_nopiv, L_nopiv, U_nopiv = torch.lu_unpack(a_LU_info_nopiv, nopiv)
                     P_nopiv_ = P_nopiv.cpu().numpy()
-                    L_nopiv_ = L_nopiv.cpu().numpy()
-                    U_nopiv_ = U_nopiv.cpu().numpy()
+                    L_nopiv_ = np.nan_to_num(L_nopiv.cpu().numpy())
+                    U_nopiv_ = np.nan_to_num(U_nopiv.cpu().numpy())
 
                     self.assertEqual(np.matmul(P_nopiv_, np.matmul(L_nopiv_, U_nopiv_)), a)
 

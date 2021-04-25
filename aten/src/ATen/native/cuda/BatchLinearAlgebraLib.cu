@@ -688,7 +688,37 @@ Tensor& orgqr_helper_cusolver(Tensor& result, const Tensor& tau, int64_t n_colum
 
 void apply_lu_cusolver_looped(Tensor& self, Tensor& pivots, Tensor& infos, bool get_pivots) {
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(self.scalar_type(), "lu_cusolver", [&]{
-    
+    auto self_data = self.data_ptr<scalar_t>();
+    auto infos_data = infos.data_ptr<int>();
+    auto self_stride = matrixStride(self);
+    int batch_size = cuda_int_cast(batchCount(self), "batch size");
+    int m = cuda_int_cast(self.size(-2), "m");
+    int n = cuda_int_cast(self.size(-1), "n");
+    int lda = std::max<int>(1, m);
+    auto handle = at::cuda::getCurrentCUDASolverDnHandle();
+
+    for (auto i = decltype(batch_size){0}; i < batch_size; ++i) {
+      if (get_pivots) {
+        auto pivots_data = pivots.data_ptr<int>();
+        auto pivots_matrix_stride = pivots.size(-1);
+        at::cuda::solver::getrf<scalar_t>(
+          handle, m, n,
+          self_data + i * self_stride,
+          lda,
+          pivots_data + i * pivots_matrix_stride,
+          infos_data + i
+        );
+      }
+      else {
+        at::cuda::solver::getrf<scalar_t>(
+          handle, m, n,
+          self_data + i * self_stride,
+          lda,
+          NULL,
+          infos_data  + i
+        );
+      }
+    }
   });
 }
 
