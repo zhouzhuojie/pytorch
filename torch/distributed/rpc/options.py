@@ -154,15 +154,21 @@ class TensorPipeRpcBackendOptions(_TensorPipeRpcBackendOptionsBase):
         """
         device_index_map = _to_device_index_map(device_map)
         curr_device_maps = super().device_maps
+        for k in device_map:
+            v = device_map[k]
+            k, v = torch.device(k), torch.device(v)
 
-        if to in curr_device_maps:
-            for k, v in device_index_map.items():
-                if k in curr_device_maps[to] and v != curr_device_maps[to][k]:
+            k_index = -1 if k.type == "cpu" else k.index
+            v_index = -1 if v.type == "cpu" else v.index
+
+            if to in curr_device_maps and k_index in curr_device_maps[to]:
+                curr_v = super().device_maps[to][k_index]
+                if curr_v != v_index:
                     raise ValueError(
                         "`set_device_map` only supports 1-to-1 mapping, trying"
                         f" to map {k} to {v} and {curr_device_maps[to][k]}"
                     )
-
+            device_index_map[k_index] = v_index
         super()._set_device_map(to, device_index_map)
 
     def set_devices(self, devices: List[DeviceType]):
