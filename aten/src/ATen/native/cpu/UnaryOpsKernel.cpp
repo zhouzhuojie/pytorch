@@ -193,6 +193,7 @@ static void imag_kernel(TensorIteratorBase& iter) {
   });
 }
 
+// NB: Ignores the negative bit on tensors
 static void conj_kernel(TensorIteratorBase& iter) {
   AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND3(
       kBool, kBFloat16, kHalf, iter.common_dtype(), "conj_cpu", [&]() {
@@ -711,7 +712,7 @@ REGISTER_DISPATCH(abs_stub, &abs_kernel);
 REGISTER_DISPATCH(angle_stub, &angle_kernel);
 REGISTER_DISPATCH(real_stub, &real_kernel);
 REGISTER_DISPATCH(imag_stub, &imag_kernel);
-REGISTER_DISPATCH(conj_stub, &conj_kernel);
+REGISTER_DISPATCH(conj_physical_stub, &conj_kernel);
 REGISTER_DISPATCH(exp2_stub, &exp2_kernel);
 REGISTER_DISPATCH(bitwise_not_stub, &bitwise_not_kernel);
 REGISTER_DISPATCH(logical_not_stub, &logical_not_kernel);
