@@ -198,9 +198,20 @@ std::pair<IValue, c10::optional<IValue>> getFunctionTuple(
 
   // operators
   std::vector<IValue> operators;
+  auto op_to_specified_args = code.op_to_num_specified_args();
   operators.reserve(opnames.size());
   for (const auto& opname : opnames) {
-    operators.emplace_back(Tup({opname.name, opname.overload_name}));
+    auto unique_name = c10::toString(opname);
+    // For operator with vararg, adding default arguments would be confusing and
+    // is not allowed. For an operator with num_args = -1, it means the number
+    // of arguments is not available for this operator, we don't do any backward
+    // compatibility adaptation at runtime.
+    int num_args = -1;
+    auto it = op_to_specified_args.find(unique_name);
+    if (it != op_to_specified_args.end()) {
+      num_args = it->second;
+    }
+    operators.emplace_back(Tup({opname.name, opname.overload_name, num_args}));
   }
 
   // constants
@@ -642,8 +653,10 @@ void export_opnames(const script::Module& m, std::set<std::string>& opnames) {
     for (const auto& op : ops_list) {
       auto op_item = op.toTuple()->elements();
       TORCH_CHECK(
-          op_item.size() == 2,
-          "There should be two parts in an operator name.");
+          op_item.size() >= 2,
+          "There should be either two parts (name and overload name), ",
+          "or three parts (name, overload name and number of specified args) ",
+          "for an operator.");
       auto opname = op_item[0].toString()->string();
       auto overload = op_item[1].toString()->string();
       opnames.emplace(overload.empty() ? opname : opname + "." + overload);
