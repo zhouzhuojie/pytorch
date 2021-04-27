@@ -177,8 +177,8 @@ def test_checkpoint_non_float_input(setup_rpc):
             return (input * 2, torch.tensor([False]))
 
     class JoinNonFloat(nn.Module):
-        def forward(self, input):
-            return input[0] * 2
+        def forward(self, input, non_float):
+            return input * 2
 
     model = nn.Sequential(ForkNonFloat(), JoinNonFloat())
     model = Pipe(model, chunks=1, checkpoint="always")
@@ -322,7 +322,17 @@ def test_input_pair(setup_rpc):
     assert a.grad is not None
     assert b.grad is not None
 
+def test_multi_sequence_input(setup_rpc):
+    class MultiSeq(nn.Module):
+        def forward(self, tup1, tup2):
+            return tup1, tup2
 
+    model = Pipe(nn.Sequential(MultiSeq()))
+    with pytest.raises(TypeError):
+        model(
+            [torch.rand(10), torch.rand(10)],
+            [torch.rand(10), torch.rand(10)]
+        )
 
 def test_input_singleton(setup_rpc):
     class One(nn.Module):
@@ -467,11 +477,11 @@ def test_partitions(setup_rpc):
     model = nn.Sequential(a, b)
     model = Pipe(model)
 
-    assert isinstance(model.partitions, nn.ModuleList)
-    assert isinstance(model.partitions[0], nn.Sequential)
-    assert isinstance(model.partitions[1], nn.Sequential)
+    assert isinstance(model.partitions, nn.Sequential)
+    assert isinstance(model.partitions[0], nn.Linear)
+    assert isinstance(model.partitions[1], nn.Linear)
 
-    assert "partitions.0.0.weight" in model.state_dict()
+    assert "partitions.0.weight" in model.state_dict()
 
 
 def test_deny_moving(setup_rpc):
@@ -533,8 +543,8 @@ def test_named_children(setup_rpc):
     model = Pipe(model)
 
     names = set(n for n, _ in model.named_modules())
-    assert "partitions.0.a" in names
-    assert "partitions.1.b" in names
+    assert "partitions.a" in names
+    assert "partitions.b" in names
 
     # Pipe doesn't support __getattr__. Unlike nn.Sequential, Pipe requires
     # several methods in its namespace.
@@ -632,3 +642,14 @@ def test_forward_lockstep(setup_rpc):
     # Partition #1:    000! 111! 222!
     #
     assert timeline == [(0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (2, 1)]
+
+@pytest.mark.parametrize("checkpoint", ["never", "always", "except_last"])
+def test_multiple_inputs(checkpoint, setup_rpc):
+    class MyModule(nn.Module):
+        def forward(self, a, b, c):
+            return a + b + c
+
+    model = Pipe(nn.Sequential(MyModule()), chunks=2, checkpoint=checkpoint)
+    t = torch.rand(10)
+    res = model(t, t, t).local_value()
+    assert torch.equal(res, t + t + t)
